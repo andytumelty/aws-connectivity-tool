@@ -1,0 +1,34 @@
+AWS connectivity: "why can/can't instance i-123abc connect to i-456def"
+
+primary goal:
+- what resources are involved in connectivity between two instances, and what
+  connectivity is allowed/will they allow connectivity on port x [protocol y]
+
+
+instance <> instance
+(could also do instance to elb?)
+
+
+Impacting resources:
+- i-a security group outbound
+- i-b security group inbound
+- different vpc
+  - vpc peering
+  - peering routing
+  - network ASG outbound VPC outbound rule, and inbound ephemeral
+  - network ASG inbound VPC inbound rule, and outbound ephemeral
+- same vpc different subnet - subnet routing
+
+security group selection:
+- source/dst sg
+- source/dst ip
+
+
+secondary goal:
+- where are the open holes in my network?
+- what resources have a lot of dependencies?
+
+
+possible extensions:
+- non-AWS routing (e.g. virtual firewalls: ssh to instances to determine
+  instance routing - assumes ssh config has been setup)
