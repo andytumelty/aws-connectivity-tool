@@ -18,7 +18,7 @@ import pprint
 
 logging.basicConfig(format='%(levelname)s,%(message)s')
 logger = logging.getLogger('default')
-logger.setLevel(logging.DEBUG)
+#logger.setLevel(logging.DEBUG)
 
 logging.getLogger('boto3').setLevel(logging.INFO)
 
@@ -169,15 +169,14 @@ def check_connectivity(resources):
             matching_rules = check_security_group(sg_resource, resources[1]['resource'], False)
             if matching_rules:
                 # matching_sg.append(security_group_to_dict(sg_resource, False))
-                matching_sg.append({sg_resource.id: matching_rules})
+                matching_sg.append({'sg_id': sg_resource.id, 'matching_rules': matching_rules})
 
         result = len(matching_sg) > 0
-        reason = '%s matching security groups found allowing egress from %s to %s' \
-                 % (len(matching_sg), resources[0]['id'], resources[1]['id'])
+        reason = '%s matching security groups found' % len(matching_sg)
 
         checks['sg_egress'] = {'result': result, 'reason': reason, 'data': matching_sg}
-    # else:
-    #     checks['sg_egress'] = {'result': True, 'reason': 'not applicable', 'data': []}
+    else:
+        checks['sg_egress'] = {'result': True, 'reason': 'not applicable', 'data': []}
 
     logger.debug('checking ingress from %s to %s' % (resources[0]['id'], resources[1]['id']))
     if resources[1]['resource']['type'] in ['instance']:
@@ -187,13 +186,14 @@ def check_connectivity(resources):
             matching_rules = check_security_group(sg_resource, resources[1]['resource'], True)
             if matching_rules:
                 # matching_sg.append(security_group_to_dict(sg_resource, False))
-                matching_sg.append({sg_resource.id: matching_rules})
+                matching_sg.append({'sg_id': sg_resource.id, 'matching_rules': matching_rules})
 
         result = len(matching_sg) > 0
-        reason = '%s matching security groups found allowing ingress from %s to %s' \
-                 % (len(matching_sg), resources[0]['id'], resources[1]['id'])
+        reason = '%s matching security groups found' % len(matching_sg)
 
         checks['sg_ingress'] = {'result': result, 'reason': reason, 'data': matching_sg}
+    else:
+        checks['sg_egress'] = {'result': True, 'reason': 'not applicable', 'data': []}
 
     # if [resources[0]['resource'].subnet_id != resources[0]['resource'].subnet_id]:
     #     logger.debug('resources not in same subnet, checking routing')
@@ -229,6 +229,56 @@ def security_group_to_dict(sg, ingress=True):
         'vpc_id': sg.vpc_id
         #'tags': sg.tags
     }
+
+
+def print_checks(checks):
+    # Desired Output
+    #
+    # Security Group Egress: Allowed
+    #   └─ sg-123abc
+    #      └─ 10.1.0.0/16 All
+    #   └─ sg-123abc
+    #      └─ 0.0.0.0/0 All
+    #   └─ sg-123abc
+    #      └─ 0.0.0.0/0 All
+    # Security Group Ingress: Allowed
+    #   └─ sg-123ab22c
+    #      └─ 10.0.0.0/8 8301/TCP
+    #   └─ sg-123abc
+    #      └─ sg-abc123 -1
+    # TODO refactor ingress and egress
+    if 'sg_egress' in checks.keys():
+        if checks['sg_egress']['result']:
+            result = 'Allowed'
+        else:
+            result = 'Blocked'
+        result = '%s (%s)' % (result, checks['sg_egress']['reason'])
+        print('Security Group Egress: %s' % result)
+        for match in checks['sg_egress']['data']:
+            print('  └─ %s' % match['sg_id'])
+            for rule in match['matching_rules']:
+                groups = [g['GroupId'] for g in rule['UserIdGroupPairs']]
+                ipranges = [c['CidrIp'] for c in rule['IpRanges']]
+                allowed = groups + ipranges
+                # TODO print port and protocol
+                print('     └─ %s' % ','.join(allowed))
+
+
+    if 'sg_ingress' in checks.keys():
+        if checks['sg_ingress']['result']:
+            result = 'Allowed'
+        else:
+            result = 'Blocked'
+        result = '%s (%s)' % (result, checks['sg_ingress']['reason'])
+        print('Security Group Ingress: %s' % result)
+        for match in checks['sg_ingress']['data']:
+            print('  └─ %s' % match['sg_id'])
+            for rule in match['matching_rules']:
+                groups = [g['GroupId'] for g in rule['UserIdGroupPairs']]
+                ipranges = [c['CidrIp'] for c in rule['IpRanges']]
+                allowed = groups + ipranges
+                # TODO print port and protocol
+                print('     └─ %s' % ','.join(allowed))
 
 
 if __name__ == '__main__':
@@ -272,25 +322,8 @@ if __name__ == '__main__':
 
     while len(resources) > 1:
         checks = check_connectivity(resources[:2])
-        pp = pprint.PrettyPrinter(indent=4)
-        pp.pprint(checks)
+        #pp = pprint.PrettyPrinter(indent=4)
+        #pp.pprint(checks)
+
+        print_checks(checks)
         resources = resources[1:]
-
-
-
-'''
-Desired Output
-
-Security Group Egress: Allowed
-  └─ sg-123abc
-     └─ 10.1.0.0/16 All
-  └─ sg-123abc
-     └─ 0.0.0.0/0 All
-  └─ sg-123abc
-     └─ 0.0.0.0/0 All
-Security Group Ingress: Allowed
-  └─ sg-123ab22c
-     └─ 10.0.0.0/8 8301/TCP
-  └─ sg-123abc
-     └─ sg-abc123 -1
-'''
