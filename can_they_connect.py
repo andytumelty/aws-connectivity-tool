@@ -22,6 +22,7 @@ logger.setLevel(logging.DEBUG)
 
 logging.getLogger('boto3').setLevel(logging.INFO)
 
+
 def get_boto_session(account):
     # tries to work out what is meant by account, and return a relevant boto session
     # checks the following: entry in can_they_connect.cfg (using aws_shared_credentials_file or aws_access_key_id and
@@ -74,29 +75,35 @@ def get_resource(resource, session):
     # - instance by tag
 
     # EC2 Instance
-    logger.debug("finding resource %s" % resource)
+    logger.debug("finding resource type for %s" % resource)
     if resource.split('-', 1)[0] == 'i':
-        logger.debug("found instance %s" % resource)
-        return session.resource('ec2').Instance(resource)
+        logger.debug("got resource type instance %s" % resource)
+        instances = session.client('ec2').describe_instances(Filters=[{'Name': 'instance-id', 'Values': [resource]}])
+        if len(instances['Reservations']) == 1:
+            return {'type': 'instance', 'data': instances['Reservations'][0]['Instances'][0]}
+        else:
+            raise Exception("Couldn't find instance %s" % resource)
+
     # IP address, for now assume EC2 instance
     # FIXME this will match on external IPs, and non-valid ones like 500.500.500.500
     elif re.match('^(\d{1,3}\.){3}\d{1,3}', resource):
-        logger.debug("found IP address %s" % resource)
-        r = session.client('ec2').describe_instances(Filters=[
-                                    {
-                                        'Name': 'private-ip-address',
-                                        'Values': [resource]
-                                    }
-                                ])
-        if len(r['Reservations']) == 1:
-            return session.resource('ec2').Instance(r['Reservations'][0]['Instances'][0]['InstanceId'])
-        elif len(r['Reservations']) < 1:
-            # FIXME raise better exception
-            raise Exception('No instance found for IP %s' % resource)
-        elif len(r['Reservations']) > 1:
+        logger.debug("got resource type IP address %s" % resource)
+        instances = session.client('ec2').describe_instances(Filters=[{'Name': 'private-ip-address', 'Values': [resource]}])
+        if len(instances['Reservations']) == 1:
+            logger.debug('found instance %s with IP address %s' % (instances['Reservations'][0]['Instances'][0]['InstanceId'], resource))
+            return {'type': 'instance', 'data': instances['Reservations'][0]['Instances'][0] }
+        elif len(instances['Reservations']) < 1:
+            logger.debug('no instance found for IP address %s, assuming external' % resource)
+            return {'type': 'ip_address', 'data': {'ip_address': resource}}
+        elif len(instances['Reservations']) > 1:
             # FIXME raise better exception
             raise Exception('More than 1 instance found for IP %s' % resource)
 
+    # c = boto3.client('elb')
+    # elbs = c.describe_load_balancers(LoadBalancerNames=['elb-outboundproxy-dcbc-prd1'])
+    # or DNS name
+    # if len(elbs['LoadBalancerDescriptions']) == 1
+    # elbs['LoadBalancerDescriptions'][0]['SecurityGroups'] -> ['sg-f0ae0289']
     else:
         raise NotImplementedError('resource %s not implemented' % resource)
 
@@ -107,9 +114,6 @@ def check_security_group(security_group, resource, inbound=True):
         permissions = security_group.ip_permissions
     else:
         permissions = security_group.ip_permissions_egress
-
-    resource_ip = resource.private_ip_address
-    resource_security_groups = resource.security_groups
 
     # TODO add port and protocol
     matching_rules = [r for r in permissions if check_rule(r, resource)]
@@ -124,9 +128,15 @@ def check_security_group(security_group, resource, inbound=True):
 
 
 def check_rule(rule, resource):
+    resource_security_groups = []
+    resource_ip = ''
+
     # returns true if rule matches resource
-    resource_ip = ipaddress.ip_address(resource.private_ip_address)
-    resource_security_groups = [sg['GroupId'] for sg in resource.security_groups]
+    if resource['type'] == 'instance':
+        resource_ip = ipaddress.ip_address(resource['data']['PrivateIpAddress'])
+        resource_security_groups = [sg['GroupId'] for sg in resource['data']['SecurityGroups']]
+    if resource['type'] == 'ip_address':
+        resource_ip = ipaddress.ip_address(resource['data']['ip_address'])
 
     match = False
 
@@ -134,48 +144,65 @@ def check_rule(rule, resource):
     cidr_blocks = [ipaddress.ip_network(i['CidrIp']) for i in rule['IpRanges']]
     security_groups = [s['GroupId'] for s in rule['UserIdGroupPairs']]
 
-    for cidr_block in cidr_blocks:
-        if resource_ip in cidr_block:
-            logger.debug("rule %s matches resource IP" % rule)
-            return True
+    if resource_ip != '':
+        for cidr_block in cidr_blocks:
+            if resource_ip in cidr_block:
+                logger.debug("rule %s matches resource IP" % rule)
+                return True
 
-    for security_group in security_groups:
-        if security_group in resource_security_groups:
-            logger.debug("rule %s matches resource sg" % rule)
-            return True
+    if resource_security_groups != []:
+        for security_group in security_groups:
+            if security_group in resource_security_groups:
+                logger.debug("rule %s matches resource sg" % rule)
+                return True
 
     return match
 
 
 def check_connectivity(resources):
-    # does resource_a outbound have rule allowing connectivity to resource_b?
-    # does resource_b inbound have rule allowing connectivity from resource_a?
+    logger.debug('checking connectivity between %s and %s' % (resources[0]['id'], resources[1]['id']))
 
-    # FIXME different subnets
-    # FIXME different VPC
-    # FIXME different accounts
-
-    # errors = []
     checks = {}
 
-    logger.debug("checking connectivity between resources %s" % resources)
-    # logger.debug(port)
-    # logger.debug(protocol)
+    logger.debug('checking egress from %s to %s' % (resources[0]['id'], resources[1]['id']))
+    # FIXME refactor
+    if resources[0]['resource']['type'] in ['instance']:
+        # find resource A security groups that allow egress to resource B
+        matching_sg = []
+        for sg in resources[0]['resource']['data']['SecurityGroups']:
+            sg_resource = resources[0]['session'].resource('ec2').SecurityGroup(sg['GroupId'])
+            if check_security_group(sg_resource, resources[1]['resource'], False):
+                # matching_sg.append(security_group_to_dict(sg_resource, False))
+                matching_sg.append(sg_resource.id)
 
-    # pre-load security groups
-    for n, resource in enumerate(resources):
-        logger.debug('resource %s security groups: %s' % (n, resources[0]['resource'].security_groups))
-        resources[n]['security_groups'] = [resources[n]['session'].resource('ec2').SecurityGroup(sg['GroupId'])
-                                           for sg in resources[n]['resource'].security_groups]
+        result = len(matching_sg) > 0
+        reason = '%s matching security groups found allowing egress from %s to %s' \
+                 % (len(matching_sg), resources[0]['id'], resources[1]['id'])
 
-    # find resource A security groups that allow egress to resource B
-    checks['sg_egress'] = [sg for sg in resources[0]['security_groups']
-                           if check_security_group(sg, resources[1]['resource'], False)]
+        checks['sg_egress'] = {'result': result, 'reason': reason, 'data': matching_sg}
+    # else:
+    #     checks['sg_egress'] = {'result': True, 'reason': 'not applicable', 'data': []}
 
-    # find resource B security groups that allow ingress from resource A
-    checks['sg_ingress'] = [sg for sg in resources[1]['security_groups']
-                            if check_security_group(sg, resources[0]['resource'], True)]
+    logger.debug('checking ingress from %s to %s' % (resources[0]['id'], resources[1]['id']))
+    if resources[1]['resource']['type'] in ['instance']:
+        matching_sg = []
+        for sg in resources[1]['resource']['data']['SecurityGroups']:
+            sg_resource = resources[1]['session'].resource('ec2').SecurityGroup(sg['GroupId'])
+            if check_security_group(sg_resource, resources[0]['resource'], True):
+                # matching_sg.append(security_group_to_dict(sg_resource, True))
+                matching_sg.append(sg_resource.id)
 
+        result = len(matching_sg) > 0
+        reason = '%s matching security groups found allowing ingress from %s to %s' \
+                 % (len(matching_sg), resources[0]['id'], resources[1]['id'])
+
+        checks['sg_ingress'] = {'result': result, 'reason': reason, 'data': matching_sg}
+
+    # if [resources[0]['resource'].subnet_id != resources[0]['resource'].subnet_id]:
+    #     logger.debug('resources not in same subnet, checking routing')
+
+        # if [resources[0]['resource'].vpc_id != resources[0]['resource'].vpc_id]:
+        #     logger.debug('resources not in same subnet, checking peering connection')
     # different subnets?
 
         # different VPC?
@@ -189,6 +216,22 @@ def check_connectivity(resources):
     # resource B inbound
 
     return checks
+
+
+# This should really be an encoder, but I'm also convinced I'm not the first person to want to do that.
+# For now, extracting the fields I want is good enough.
+def security_group_to_dict(sg, ingress=True):
+    if ingress:
+        perms = sg.ip_permissions
+    else:
+        perms = sg.ip_permissions_egress
+    return {
+        'id': sg.id,
+        'group_name': sg.group_name,
+        'rules': perms,
+        'vpc_id': sg.vpc_id
+        #'tags': sg.tags
+    }
 
 
 if __name__ == '__main__':
@@ -209,19 +252,11 @@ if __name__ == '__main__':
                # "to instance i-456def in the inherited shell AWS account (see AWS accounts and credentials below)\n\n"
                # ""
     )
-    # TODO document config
-    # TODO check by domain, ELB, IP address
-    # TODO check ephemeral - but only if TCP/ICMP are protocols maybe????
-    # TODO bi-directional flag
-    parser.add_argument('resource', nargs=2)
-    # TODO check specific ports
-    # parser.add_argument('--protocol', default='All', choices=['All', 'TCP', 'UDP'])
-    # parser.add_argument('--port', default='0-65535', help='port or port range to check')
+    parser.add_argument('resource1', nargs=1, metavar='resource')
+    parser.add_argument('resource2', nargs='+', metavar='resource')
     args = parser.parse_args()
 
-    resources = args.resource
-    # port = args.port
-    # protocol = args.protocol
+    resources = args.resource1 + args.resource2
 
     for n, resource in enumerate(resources):
         if '/' in resource:
@@ -233,11 +268,32 @@ if __name__ == '__main__':
             session = boto3.session.Session()
         # TODO extend for non-instance resources
         resources[n] = {
+            'id': resource_id,
             'resource': get_resource(resource_id, session),
             'session': session
         }
 
-    checks = check_connectivity(resources)
+    while len(resources) > 1:
+        checks = check_connectivity(resources[:2])
+        pp = pprint.PrettyPrinter(indent=4)
+        pp.pprint(checks)
+        resources = resources[1:]
 
-    pp = pprint.PrettyPrinter(indent=4)
-    pp.pprint(checks)
+
+
+'''
+Desired Output
+
+Security Group Egress: Allowed
+  └─ sg-123abc
+     └─ 10.1.0.0/16 All
+  └─ sg-123abc
+     └─ 0.0.0.0/0 All
+  └─ sg-123abc
+     └─ 0.0.0.0/0 All
+Security Group Ingress: Allowed
+  └─ sg-123ab22c
+     └─ 10.0.0.0/8 8301/TCP
+  └─ sg-123abc
+     └─ sg-abc123 -1
+'''
