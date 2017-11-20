@@ -119,12 +119,7 @@ def check_security_group(security_group, resource, inbound=True):
     matching_rules = [r for r in permissions if check_rule(r, resource)]
 
     logger.debug("found matching rules: %s" % matching_rules)
-
-    # TODO return matching rules instead
-    if len(matching_rules) > 0:
-        return True
-    else:
-        return False
+    return matching_rules
 
 
 def check_rule(rule, resource):
@@ -171,9 +166,10 @@ def check_connectivity(resources):
         matching_sg = []
         for sg in resources[0]['resource']['data']['SecurityGroups']:
             sg_resource = resources[0]['session'].resource('ec2').SecurityGroup(sg['GroupId'])
-            if check_security_group(sg_resource, resources[1]['resource'], False):
+            matching_rules = check_security_group(sg_resource, resources[1]['resource'], False)
+            if matching_rules:
                 # matching_sg.append(security_group_to_dict(sg_resource, False))
-                matching_sg.append(sg_resource.id)
+                matching_sg.append({sg_resource.id: matching_rules})
 
         result = len(matching_sg) > 0
         reason = '%s matching security groups found allowing egress from %s to %s' \
@@ -188,9 +184,10 @@ def check_connectivity(resources):
         matching_sg = []
         for sg in resources[1]['resource']['data']['SecurityGroups']:
             sg_resource = resources[1]['session'].resource('ec2').SecurityGroup(sg['GroupId'])
-            if check_security_group(sg_resource, resources[0]['resource'], True):
-                # matching_sg.append(security_group_to_dict(sg_resource, True))
-                matching_sg.append(sg_resource.id)
+            matching_rules = check_security_group(sg_resource, resources[1]['resource'], True)
+            if matching_rules:
+                # matching_sg.append(security_group_to_dict(sg_resource, False))
+                matching_sg.append({sg_resource.id: matching_rules})
 
         result = len(matching_sg) > 0
         reason = '%s matching security groups found allowing ingress from %s to %s' \
